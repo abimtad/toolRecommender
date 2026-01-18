@@ -1,0 +1,63 @@
+# Python bytecode and cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+dist/
+eggs/
+.eggs/
+wheels/
+share/python-wheels/
+*.egg-info/
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.conda/
+
+# Pip / installer metadata
+pip-wheel-metadata/
+
+# Test, coverage, and caches
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.cache/
+pytest_cache/
+
+# Type checking / analysis
+.mypy_cache/
+.pytype/
+
+# Logs
+*.log
+logs/
+
+# IDE / Editor
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+.env.*
+*.env
+*.pem
+*.key
+
+# Jupyter
+.ipynb_checkpoints/
