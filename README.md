@@ -1,70 +1,118 @@
 # Tool Recommender
 
-A lightweight assistant that finds Galaxy tools by embedding their metadata into an Upstash Vector index and answering queries via an LLM tool call. Chat history and tool call transcripts are stored in MongoDB so the assistant can persist conversations.
+An assistant that recommends Galaxy tools using semantic search over an Upstash Vector index and an LLM with a bound tool. Conversations and tool-call transcripts are stored in MongoDB.
 
-## What it does
-- Fetches Galaxy tool metadata via BioBlend and indexes it into Upstash Vector for semantic search.
-- Exposes a LangChain tool (`tool_search`) that the chatbot uses to retrieve relevant tools.
-- Stores conversations and tool responses in MongoDB for history and debugging.
+## Highlights
+- Indexes Galaxy tool metadata in Upstash Vector for fast, semantic lookup.
+- Chatbot uses a LangChain tool to fetch relevant tools during a conversation.
+- Clean CLI with colors, shows tool data before the agent’s reply, and supports screen clearing.
 
-## Project layout
-- Chat loop and tool dispatch: [src/chatbot.py](src/chatbot.py)
+## Architecture
+- Chat + tool dispatch: [src/chatbot.py](src/chatbot.py)
+- CLI interface: [src/ui.py](src/ui.py)
 - Tool search wrapper: [src/tools/toolSearch.py](src/tools/toolSearch.py)
 - Vector ingest/query: [src/rag/ingest.py](src/rag/ingest.py), [src/rag/query.py](src/rag/query.py)
-- External services: [src/lib/galaxy.py](src/lib/galaxy.py), [src/lib/upstash.py](src/lib/upstash.py), [src/lib/db.py](src/lib/db.py)
+- External service integrations: [src/lib/galaxy.py](src/lib/galaxy.py), [src/lib/upstash.py](src/lib/upstash.py), [src/lib/db.py](src/lib/db.py)
 - Message store helpers: [src/utils/memory.py](src/utils/memory.py)
 - Environment loading: [src/config/env.py](src/config/env.py)
 
-## Prerequisites
+## Requirements
 - Python 3.10+
-- Access to a MongoDB instance
-- Galaxy API URL and API key
-- Upstash Vector database (REST URL and token)
-- OpenAI API key (for ChatOpenAI); optional `OPENAI_MODEL` override
+- MongoDB (local or remote)
+- Galaxy URL + API key
+- Upstash Vector (REST URL + token)
+- An LLM provider:
+    - OpenRouter: `OPEN_ROUTER_API=https://openrouter.ai/api/v1` and `OPEN_ROUTER_API_KEY=...`
+    - Or OpenAI: switch the code to use `OPENAI_API_KEY` and native OpenAI endpoints (see notes below).
 
-## Environment variables
-Create a `.env` in the repo root with at least:
+## Configuration (.env)
+Create a `.env` at the repo root:
 
 ```
+# Mongo
 MONGO_URI=mongodb://localhost:27017
 DATABASE_NAME=tool-recommender
+
+# Galaxy
 GALAXY_URL=https://usegalaxy.org
 GALAXY_API_KEY=your_galaxy_api_key
+
+# Upstash Vector
 UPSTASH_VECTOR_REST_URL=https://your-upstash-url
 UPSTASH_VECTOR_REST_TOKEN=your_upstash_token
-OPENAI_API_KEY=sk-...
-# Optional
+
+# LLM (OpenRouter)
+OPEN_ROUTER_API=https://openrouter.ai/api/v1
+OPEN_ROUTER_API_KEY=your_openrouter_key
+
+# Optional model override
 OPENAI_MODEL=gpt-4o-mini
 ```
 
-## Setup
+If you prefer OpenAI instead of OpenRouter, you can update `build_llm()` in [src/chatbot.py](src/chatbot.py) to use:
+
+```python
+ChatOpenAI(model=model_name, temperature=temperature)  # reads OPENAI_API_KEY from env
+```
+
+and set in `.env`:
+
+```
+OPENAI_API_KEY=sk-...
+```
+
+## Install
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Index Galaxy tools
-This fetches Galaxy tools and upserts them into Upstash Vector.
+If pip times out, retry with a longer timeout:
+```bash
+pip install --default-timeout 120 --retries 3 -r requirements.txt
+```
+
+## Ingest Galaxy tools (build the index)
+This pulls Galaxy tools and upserts them into Upstash Vector.
 
 ```bash
 python -m src.rag.ingest
 ```
 
-## Query tools programmatically
+## Run the CLI chatbot
+Start an interactive session:
+
+```bash
+python -m src.ui
+```
+
+Commands inside the CLI:
+- `/help` – brief usage
+- `/clear` or `/cls` – clear the screen and header
+- `/color` – enable colored output
+- `/mono` – disable colored output
+- `/exit` or `/quit` – leave the session
+
+Behavior:
+- The UI prints your message in color.
+- When the agent calls a tool, it prints “Calling tool …” and shows the tool data (JSON highlighted) before the agent’s final reply.
+
+## Programmatic usage
+Query tools directly:
+
 ```bash
 python - <<'PY'
 from src.rag.query import query_tools
 
 results = query_tools("align sequencing reads", top_k=3)
 for r in results:
-    meta = getattr(r, "metadata", {}) or {}
-    print(meta.get("name"), meta.get("version"))
+        meta = getattr(r, "metadata", {}) or {}
+        print(meta.get("name"), meta.get("version"))
 PY
 ```
 
-## Run a chat turn
-The chat loop persists history in MongoDB and will call the vector tool when needed.
+Chat turn from code:
 
 ```bash
 python - <<'PY'
@@ -75,12 +123,22 @@ print(reply)
 PY
 ```
 
-## How it works (flow)
-1) [src/rag/ingest.py](src/rag/ingest.py) pulls tool metadata from Galaxy and writes embeddings to Upstash Vector.
-2) [src/tools/toolSearch.py](src/tools/toolSearch.py) queries the vector index and formats matches.
-3) [src/chatbot.py](src/chatbot.py) builds a ChatOpenAI model bound to the tool and loops, dispatching tool calls and saving all messages via [src/utils/memory.py](src/utils/memory.py).
+## Data & persistence
+- Messages are stored in the `messages` collection under `DATABASE_NAME`.
+- The chat reconstruction skips stored tool payloads to keep OpenAI/OpenRouter message sequences valid.
 
-## Notes
-- The ingest script prints basic progress; rerun it to refresh the index.
-- MongoDB stores message history in a `messages` collection under `DATABASE_NAME`.
-- Error messages while upserting usually indicate missing Upstash credentials or network issues.
+## Troubleshooting
+- Pip dependency conflict (async-timeout): this repo pins `async-timeout==4.0.2` to satisfy LangChain on Python 3.10.
+- Pip timeout: use `--default-timeout 120 --retries 3`.
+- Invalid message role (OpenAI 400): old tool messages can violate ordering; the chat history builder skips orphan tool messages. If needed, clear history:
+    ```bash
+    mongosh --eval 'db.messages.drop()' "$DATABASE_NAME"
+    ```
+- Tool call issues: ensure `UPSTASH_VECTOR_REST_URL` and `UPSTASH_VECTOR_REST_TOKEN` are set and the ingest step completed.
+- Galaxy API failures: verify `GALAXY_URL` and `GALAXY_API_KEY`.
+- OpenRouter auth: set both `OPEN_ROUTER_API` and `OPEN_ROUTER_API_KEY`.
+
+## Notes for developers
+- The bound tool is declared in [src/chatbot.py](src/chatbot.py) and named `tool_search_tool` to avoid name collisions with the Python function in [src/tools/toolSearch.py](src/tools/toolSearch.py).
+- If you switch providers, update `build_llm()` accordingly and ensure the right env vars are set.
+- The UI in [src/ui.py](src/ui.py) avoids heavy box-drawing and focuses on readable output with subtle coloring.
