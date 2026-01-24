@@ -1,12 +1,13 @@
 import json
 import os
-from typing import Any, List, Sequence, Tuple
+from typing import Any, List, Sequence, Tuple, Callable, Optional
+from src.config.env import OPEN_ROUTER_API, OPEN_ROUTER_API_KEY
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain.tools import tool
 from langchain_openai import ChatOpenAI
 
-from src.tools.toolSearch import tool_search
+from src.tools.toolSearch import tool_search as py_tool_search
 from src.utils.memory import add_messages, get_messages, save_tool_response
 
 SYSTEM_PROMPT = (
@@ -19,34 +20,34 @@ SYSTEM_PROMPT = (
 @tool
 def tool_search_tool(query: str, top_k: int = 5) -> str:
     """Search Galaxy tools using the vector index and return JSON results."""
-    return tool_search(query=query, top_k=top_k)
+    return py_tool_search(query=query, top_k=top_k)
 
 
 def build_llm(model: str | None = None, temperature: float = 0) -> ChatOpenAI:
     model_name = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    return ChatOpenAI(model=model_name, temperature=temperature).bind_tools([tool_search_tool])
+    return ChatOpenAI(
+        model=model_name,
+        temperature=temperature,
+        api_key=OPEN_ROUTER_API_KEY,
+        base_url=OPEN_ROUTER_API,
+    ).bind_tools([tool_search_tool])
 
 
 def docs_to_lc_messages(docs: Sequence[dict]) -> List[BaseMessage]:
+    """Simplify history: include only system/user/assistant content.
+
+    Previously persisted tool metadata may not match the exact schema expected
+    by the client, and is not needed for future turns. Skipping tool messages
+    avoids invalid payloads (e.g., unexpected fields like 'index').
+    """
     messages: List[BaseMessage] = [SystemMessage(content=SYSTEM_PROMPT)]
     for doc in docs:
         role = doc.get("role")
         if role == "user":
             messages.append(HumanMessage(content=doc.get("content", "")))
         elif role == "assistant":
-            messages.append(
-                AIMessage(
-                    content=doc.get("content", ""),
-                    tool_calls=doc.get("tool_calls", []),
-                )
-            )
-        elif role == "tool":
-            messages.append(
-                ToolMessage(
-                    content=doc.get("content", ""),
-                    tool_call_id=doc.get("tool_call_id", ""),
-                )
-            )
+            messages.append(AIMessage(content=doc.get("content", "")))
+        # Skip stored tool messages in reconstructed history
     return messages
 
 
@@ -124,14 +125,14 @@ def dispatch_tool_call(tc: Any) -> Tuple[str, str]:
     parsed_args = parse_arguments(args)
     tool_name = name or "tool_search"
 
-    if tool_name in {"tool_search", "search_tools"}:
+    if tool_name in {"tool_search", "search_tools", "tool_search_tool"}:
         query = parsed_args.get("query") or parsed_args.get("q") or ""
         top_k = parsed_args.get("top_k") or parsed_args.get("k") or 5
         try:
             top_k = int(top_k)
         except (TypeError, ValueError):
             top_k = 5
-        result = tool_search(query=query, top_k=top_k)
+        result = py_tool_search(query=query, top_k=top_k)
         return tool_name, result
 
     return tool_name, f"Unsupported tool: {tool_name}"
@@ -151,7 +152,11 @@ def store_ai_message(ai_msg: AIMessage):
     )
 
 
-def run_chat(user_input: str, model: str | None = None) -> str:
+def run_chat(
+    user_input: str,
+    model: str | None = None,
+    on_event: Optional[Callable[[dict], None]] = None,
+) -> str:
     # Persist user message first so it becomes part of history
     add_messages([
         {
@@ -178,6 +183,30 @@ def run_chat(user_input: str, model: str | None = None) -> str:
             if tc_id is None and isinstance(tc, dict):
                 tc_id = tc.get("id")
 
+            # Preview tool call event to UI
+            name = getattr(tc, "name", None)
+            args = getattr(tc, "args", None)
+            function = getattr(tc, "function", None)
+            if isinstance(tc, dict):
+                function = function or tc.get("function")
+                name = name or tc.get("name") or (function or {}).get("name")
+                args = args or tc.get("args") or (
+                    function or {}).get("arguments")
+
+            parsed_args = parse_arguments(args)
+            tool_name = name or "tool_search"
+
+            if on_event:
+                try:
+                    on_event({
+                        "type": "tool_call",
+                        "name": tool_name,
+                        "args": parsed_args,
+                        "id": str(tc_id or ""),
+                    })
+                except Exception:
+                    pass
+
             _, tool_output = dispatch_tool_call(tc)
 
             # Persist tool result
@@ -191,6 +220,18 @@ def run_chat(user_input: str, model: str | None = None) -> str:
                     tool_call_id=str(tc_id or ""),
                 )
             )
+
+            # Notify UI of tool result
+            if on_event:
+                try:
+                    on_event({
+                        "type": "tool_result",
+                        "name": tool_name,
+                        "result": tool_output,
+                        "id": str(tc_id or ""),
+                    })
+                except Exception:
+                    pass
 
 
 if __name__ == "__main__":
