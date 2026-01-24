@@ -45,7 +45,6 @@ pytest_cache/
 logs/
 
 # IDE / Editor
-.vscode/
 .idea/
 
 # OS files
@@ -53,7 +52,6 @@ logs/
 Thumbs.db
 
 # Environment / secrets
-.env
 *.env
 *.pem
 *.key
@@ -61,3 +59,9 @@ Thumbs.db
 # Jupyter
 .ipynb_checkpoints/
 task_answer-key.*
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore
+config.bat
+node_modules
